@@ -1,0 +1,45 @@
+[project]
+dependencies = ["fastapi>=0.135.1,<0.136", "uvicorn>=0.42.0,<0.43", "asyncpg>=0.31.0,<0.32", "httpx>=0.28.1,<0.29"]
+name = "postgres_analyst"
+requires-python = ">= 3.11"
+version = "0.1.0"
+
+[build-system]
+build-backend = "hatchling.build"
+requires = ["hatchling"]
+
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+platforms = ["osx-arm64"]
+
+[tool.pixi.pypi-dependencies]
+postgres_analyst = { path = ".", editable = true }
+
+[tool.pixi.tasks]
+# Postgres tasks
+init-db = """
+mkdir -p .pgdata && \
+initdb -D .pgdata --auth=trust --username=cortex && \
+echo "unix_socket_directories = '$(pwd)/.pgdata'" >> .pgdata/postgresql.conf && \
+echo "port = 5434" >> .pgdata/postgresql.conf
+"""
+start-db = "pg_ctl -D .pgdata -l .pgdata/postgres.log start"
+stop-db = "pg_ctl -D .pgdata stop"
+seed-db = "psql -h localhost -p 5434 -U cortex -d cortexdb -f init.sql"
+create-db = "createdb -h localhost -p 5434 -U cortex cortexdb"
+setup-db = { depends-on = ["init-db", "start-db", "create-db", "seed-db"] }
+
+# Backend
+backend = "uvicorn backend.main:app --reload --port 8000"
+
+# Frontend
+install-frontend = "cd frontend && npm install"
+frontend = "cd frontend && npm run dev"
+
+# Dev (run both)
+dev = { depends-on = ["start-db"], cmd = "echo 'DB started. Run pixi run backend and pixi run frontend in separate terminals.'" }
+
+[tool.pixi.dependencies]
+postgresql = ">=18.3,<19"
+nodejs = ">=25.7.0,<25.8"
+python = "3.12.*"

@@ -122,6 +122,9 @@ export function ChatPanel({ modelId, history, onQueryDone }) {
             {msg.result && (
               <>
                 <div class="row-count">{msg.result.row_count} row{msg.result.row_count !== 1 ? 's' : ''}</div>
+                {msg.result.pii_redacted && msg.result.pii_redacted.length > 0 && (
+                  <div class="pii-notice">PII columns redacted: {msg.result.pii_redacted.join(', ')}</div>
+                )}
                 <table class="result-table">
                   <thead>
                     <tr>{msg.result.columns.map(c => <th key={c}>{c}</th>)}</tr>

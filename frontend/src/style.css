@@ -388,6 +388,12 @@ button.primary:disabled {
   margin-bottom: 8px;
 }
 
+.pii-notice {
+  font-size: 11px;
+  color: #e8a04a;
+  margin-bottom: 8px;
+}
+
 .error-box {
   background: rgba(229, 69, 69, 0.1);
   border: 1px solid var(--error);

@@ -379,6 +379,22 @@ def _extract_sql(raw: str) -> str | None:
     return None
 
 
+async def _get_pii_columns(model_id: int | None) -> set[str]:
+    """Return a set of column names marked as PII in the semantic model."""
+    if model_id is None:
+        rows = await pool.fetch(
+            "SELECT column_name FROM semantic_columns WHERE is_pii = TRUE"
+        )
+    else:
+        rows = await pool.fetch("""
+            SELECT c.column_name
+            FROM semantic_columns c
+            JOIN semantic_tables t ON c.table_id = t.id
+            WHERE c.is_pii = TRUE AND t.model_id = $1
+        """, model_id)
+    return {r["column_name"] for r in rows}
+
+
 async def _call_ollama(prompt: str) -> str:
     async with httpx.AsyncClient(timeout=120.0) as client:
         resp = await client.post(
@@ -423,8 +439,8 @@ async def query(req: QueryRequest):
             "the user's question based on this schema.\n\n"
             "Rules:\n"
             "- Use only the column names shown in the schema — they are the real column names.\n"
-            "- Columns marked [PII] exist and can be used for JOINs/WHERE, but avoid "
-            "selecting them in output unless the user specifically asks for them.\n"
+            "- Columns marked [PII] MUST NEVER appear in SELECT output. "
+            "They can only be used in JOINs/WHERE/GROUP BY.\n"
             "- Use the relationships listed to JOIN tables.\n"
             "- Return only the SQL query.\n\n"
             f"{schema_prompt}\n"
@@ -474,8 +490,24 @@ async def query(req: QueryRequest):
     if last_error:
         return {"error": "SQL error", "sql": sql, "detail": last_error}
 
-    columns = [str(k) for k in rows[0].keys()] if rows else []
-    result_rows = [[v if not isinstance(v, bytes) else v.hex() for v in r.values()] for r in rows]
+    all_columns = [str(k) for k in rows[0].keys()] if rows else []
+
+    # Enforce PII protection: strip PII columns from results
+    pii_columns = await _get_pii_columns(req.model_id)
+    redacted = pii_columns & set(all_columns)
+    if redacted:
+        safe_indices = [i for i, c in enumerate(all_columns) if c not in pii_columns]
+        columns = [all_columns[i] for i in safe_indices]
+        result_rows = [
+            [
+                (v if not isinstance(v, bytes) else v.hex())
+                for j, v in enumerate(r.values()) if j in safe_indices
+            ]
+            for r in rows
+        ]
+    else:
+        columns = all_columns
+        result_rows = [[v if not isinstance(v, bytes) else v.hex() for v in r.values()] for r in rows]
 
     # Save to history
     try:
@@ -486,12 +518,15 @@ async def query(req: QueryRequest):
     except Exception:
         pass
 
-    return {
+    response = {
         "sql": sql,
         "columns": columns,
         "rows": result_rows,
         "row_count": len(result_rows),
     }
+    if redacted:
+        response["pii_redacted"] = sorted(redacted)
+    return response
 
 
 @app.get("/api/history")

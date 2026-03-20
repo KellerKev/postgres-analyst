@@ -14,6 +14,15 @@ export function ChatPanel({ modelId, history, onQueryDone }) {
   const [loading, setLoading] = useState(false)
   const [showHistory, setShowHistory] = useState(false)
 
+  const runQuery = async (body, msgIndex) => {
+    const res = await fetch('/api/query', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    return await res.json()
+  }
+
   const submit = async (overrideSql, msgIndex) => {
     const isRerun = overrideSql !== undefined
     const q = isRerun ? messages[msgIndex].question : question.trim()
@@ -35,23 +44,20 @@ export function ChatPanel({ modelId, history, onQueryDone }) {
         body.sql = overrideSql
         body.was_edited = true
       }
-      const res = await fetch('/api/query', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      })
-      const data = await res.json()
+      const data = await runQuery(body)
 
       setMessages(prev => prev.map((m, i) => {
-        if (isRerun ? i === msgIndex : i === prev.length - 1) {
-          if (data.error) {
-            return { ...m, loading: false, error: data.error, detail: data.detail, sql: data.sql || data.raw || '', editSql: data.sql || '' }
-          }
-          return { ...m, loading: false, sql: data.sql, editSql: data.sql, result: data, error: null }
+        const target = isRerun ? msgIndex : prev.length - 1
+        if (i !== target) return m
+        if (data.pii_blocked) {
+          return { ...m, loading: false, piiBlocked: data, sql: data.sql }
         }
-        return m
+        if (data.error) {
+          return { ...m, loading: false, error: data.error, detail: data.detail, sql: data.sql || data.raw || '', editSql: data.sql || '' }
+        }
+        return { ...m, loading: false, sql: data.sql, editSql: data.sql, result: data, error: null }
       }))
-      onQueryDone()
+      if (!data.pii_blocked) onQueryDone()
     } catch (e) {
       setMessages(prev => prev.map((m, i) => {
         const target = isRerun ? msgIndex : prev.length - 1
@@ -60,6 +66,44 @@ export function ChatPanel({ modelId, history, onQueryDone }) {
     } finally {
       setLoading(false)
     }
+  }
+
+  const acceptWithoutPii = async (msgIndex) => {
+    setMessages(prev => prev.map((m, i) =>
+      i === msgIndex ? { ...m, loading: true, piiBlocked: null } : m
+    ))
+    setLoading(true)
+
+    try {
+      const msg = messages[msgIndex]
+      const data = await runQuery({
+        question: msg.question,
+        model_id: modelId,
+        sql: msg.sql,
+        accept_without_pii: true,
+      })
+
+      setMessages(prev => prev.map((m, i) => {
+        if (i !== msgIndex) return m
+        if (data.error) {
+          return { ...m, loading: false, error: data.error, detail: data.detail }
+        }
+        return { ...m, loading: false, sql: data.sql, editSql: data.sql, result: data, error: null }
+      }))
+      onQueryDone()
+    } catch (e) {
+      setMessages(prev => prev.map((m, i) =>
+        i === msgIndex ? { ...m, loading: false, error: e.message } : m
+      ))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const declinePiiQuery = (msgIndex) => {
+    setMessages(prev => prev.map((m, i) =>
+      i === msgIndex ? { ...m, piiBlocked: null, sql: null, dismissed: true } : m
+    ))
   }
 
   const onKeyDown = (e) => {
@@ -98,7 +142,33 @@ export function ChatPanel({ modelId, history, onQueryDone }) {
                 {msg.detail && <div style={{ marginTop: '4px' }}>{msg.detail}</div>}
               </div>
             )}
-            {msg.sql && (
+            {msg.piiBlocked && (
+              <div class="pii-blocked-box">
+                <div class="pii-blocked-title">PII Protection</div>
+                <div>
+                  This query returns PII columns that cannot be displayed:{' '}
+                  <strong>{msg.piiBlocked.blocked_columns.join(', ')}</strong>
+                </div>
+                <div style={{ marginTop: '8px' }}>
+                  I can run this query with only non-PII columns:
+                </div>
+                <ul class="pii-available-list">
+                  {Object.entries(msg.piiBlocked.safe_columns).map(([table, cols]) => (
+                    <li key={table}><strong>{table}</strong>: {cols.join(', ')}</li>
+                  ))}
+                </ul>
+                <div class="pii-blocked-actions">
+                  <button class="primary" onClick={() => acceptWithoutPii(i)}>
+                    Run with suggested columns
+                  </button>
+                  <button onClick={() => declinePiiQuery(i)}>Something else</button>
+                </div>
+              </div>
+            )}
+            {msg.dismissed && (
+              <div class="chat-system-msg">OK, what else can I help with?</div>
+            )}
+            {msg.sql && !msg.piiBlocked && (
               <>
                 <div class="sql-block">
                   <textarea
@@ -122,9 +192,6 @@ export function ChatPanel({ modelId, history, onQueryDone }) {
             {msg.result && (
               <>
                 <div class="row-count">{msg.result.row_count} row{msg.result.row_count !== 1 ? 's' : ''}</div>
-                {msg.result.pii_redacted && msg.result.pii_redacted.length > 0 && (
-                  <div class="pii-notice">PII columns redacted: {msg.result.pii_redacted.join(', ')}</div>
-                )}
                 <table class="result-table">
                   <thead>
                     <tr>{msg.result.columns.map(c => <th key={c}>{c}</th>)}</tr>
@@ -152,11 +219,11 @@ export function ChatPanel({ modelId, history, onQueryDone }) {
       </div>
       {showHistory && (
         <div style={{ maxHeight: '200px', overflowY: 'auto', padding: '0 12px 12px' }}>
-          {history.map(h => (
-            <div class="history-item" key={h.id}>
-              <div class="hist-q">{h.question}</div>
+          {history.map(item => (
+            <div class="history-item" key={item.id}>
+              <div class="hist-q">{item.question}</div>
               <div class="hist-meta">
-                {h.result_rows} rows{h.was_edited ? ' (edited)' : ''} — {new Date(h.created_at).toLocaleString()}
+                {item.result_rows} rows{item.was_edited ? ' (edited)' : ''} — {new Date(item.created_at).toLocaleString()}
               </div>
             </div>
           ))}

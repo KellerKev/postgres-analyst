@@ -2,7 +2,13 @@
 
 **Ask your Postgres database questions in plain English. Get SQL back. No cloud, no API keys, no per-query billing.**
 
-This is a local, open-source alternative to tools like [Snowflake Cortex Analyst](https://docs.snowflake.com/en/user-guide/snowflake-cortex/cortex-analyst). It connects to any Postgres database, lets you build a visual **semantic layer** on top of your schema, and uses a local LLM (via [Ollama](https://ollama.com)) to translate natural language questions into SQL queries.
+A local, open-source semantic layer for Postgres. Connect to any database, build a visual semantic model with LLM-powered auto-describe, and translate natural language questions into SQL queries — all running locally with [Ollama](https://ollama.com).
+
+![Auto-describe: the LLM generates descriptions, detects PII, and suggests visibility for your entire schema](pganalyst_describe.png)
+
+![Chat: ask questions in plain English, get SQL and results](pganalyst_sql_query.png)
+
+## How it works
 
 ```
 [Your Postgres DB]
@@ -46,7 +52,7 @@ This project demonstrates a pattern that's becoming central to how companies bui
 ### Setup
 
 ```bash
-git clone <this-repo>
+git clone https://github.com/KellerKev/postgres-analyst.git
 cd postgres-analyst
 
 # One-time setup: initializes Postgres, creates DB, seeds demo data
@@ -143,7 +149,7 @@ Full OpenAPI docs available at `http://localhost:8000/docs` when the backend is 
 - **Data catalogs** — Auto-describe your schema and maintain a living semantic layer alongside your database
 - **Multi-tenant analytics** — Create different semantic models for different teams, each with appropriate access controls
 - **Prototyping** — Test whether a semantic layer + LLM approach works for your data before investing in commercial tools
-- **Learning** — Understand how Snowflake Cortex Analyst, dbt semantic layer, and similar products work under the hood
+- **Learning** — Understand how semantic layers, dbt-style modeling, and LLM-powered query generation work under the hood
 
 ## License
 

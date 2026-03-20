@@ -61,6 +61,7 @@ class QueryRequest(BaseModel):
     model_id: int | None = None
     sql: str | None = None
     was_edited: bool = False
+    accept_without_pii: bool = False
 
 
 class ModelCreate(BaseModel):
@@ -242,13 +243,15 @@ async def auto_describe():
     described = []
     for tbl in tables:
         llm_tbl = next(
-            (t for t in result.get("tables", []) if t["table_name"] == tbl["table_name"]),
+            (t for t in result.get("tables", [])
+             if isinstance(t, dict) and t.get("table_name") == tbl["table_name"]),
             {},
         )
         cols = []
         for col in tbl["columns"]:
             llm_col = next(
-                (c for c in llm_tbl.get("columns", []) if c["column_name"] == col["column_name"]),
+                (c for c in llm_tbl.get("columns", [])
+                 if isinstance(c, dict) and c.get("column_name") == col["column_name"]),
                 {},
             )
             cols.append({
@@ -345,7 +348,7 @@ def _build_schema_prompt(sem_tables: list[dict], fk_rows: list) -> str:
             if col.get("description"):
                 parts.append(f": {col['description']}")
             if col.get("is_pii"):
-                parts.append(" [PII — exists but should not be in SELECT output]")
+                parts.append(" [PII]")
             elif not col.get("is_visible", True):
                 parts.append(" [hidden — avoid unless necessary]")
             schema_lines.append("".join(parts))
@@ -395,6 +398,7 @@ async def _get_pii_columns(model_id: int | None) -> set[str]:
     return {r["column_name"] for r in rows}
 
 
+
 async def _call_ollama(prompt: str) -> str:
     async with httpx.AsyncClient(timeout=120.0) as client:
         resp = await client.post(
@@ -439,8 +443,7 @@ async def query(req: QueryRequest):
             "the user's question based on this schema.\n\n"
             "Rules:\n"
             "- Use only the column names shown in the schema — they are the real column names.\n"
-            "- Columns marked [PII] MUST NEVER appear in SELECT output. "
-            "They can only be used in JOINs/WHERE/GROUP BY.\n"
+            "- Columns marked [PII] exist and can be used in queries normally.\n"
             "- Use the relationships listed to JOIN tables.\n"
             "- Return only the SQL query.\n\n"
             f"{schema_prompt}\n"
@@ -455,6 +458,73 @@ async def query(req: QueryRequest):
         sql = _extract_sql(raw)
         if not sql:
             return {"error": "Could not parse SQL from response", "raw": raw}
+
+    # Pre-flight PII check: probe column names with LIMIT 0
+    pii_columns = await _get_pii_columns(req.model_id)
+    if pii_columns:
+        try:
+            async with pool.acquire() as conn:
+                await conn.execute("SET statement_timeout = '5s'")
+                stmt = await conn.prepare(f"SELECT * FROM ({sql}) _pii_probe LIMIT 0")
+                probe_columns = [a.name for a in stmt.get_attributes()]
+        except Exception:
+            probe_columns = []
+
+        blocked = pii_columns & set(probe_columns) if probe_columns else set()
+        if blocked:
+            # Find tables referenced in the SQL
+            sem = await get_semantic(model_id=req.model_id)
+            all_sem_tables = sem["tables"]
+            sql_upper = sql.upper()
+            referenced_tables = [
+                t for t in all_sem_tables if t["table_name"].upper() in sql_upper
+            ]
+            if not referenced_tables:
+                referenced_tables = all_sem_tables
+
+            # Collect non-PII columns from referenced tables
+            safe_by_table = {}
+            for tbl in referenced_tables:
+                safe_cols = [
+                    c["column_name"] for c in tbl.get("columns", [])
+                    if not c.get("is_pii", False)
+                ]
+                if safe_cols:
+                    safe_by_table[tbl["table_name"]] = safe_cols
+
+            if not req.accept_without_pii:
+                return {
+                    "pii_blocked": True,
+                    "sql": sql,
+                    "blocked_columns": sorted(blocked),
+                    "safe_columns": safe_by_table,
+                }
+
+            # User accepted: build a new query using only non-PII columns
+            if not safe_by_table:
+                return {"error": "No non-PII columns available for these tables."}
+            # Build SELECT from the referenced tables' safe columns
+            if len(referenced_tables) == 1:
+                tbl_name = referenced_tables[0]["table_name"]
+                cols = safe_by_table[tbl_name]
+                col_list = ", ".join(cols)
+                sql = f'SELECT {col_list} FROM "{tbl_name}"'
+            else:
+                # Multi-table: select safe columns that exist in the original result,
+                # or fall back to all safe columns from the first table
+                all_safe = set()
+                for cols in safe_by_table.values():
+                    all_safe.update(cols)
+                safe_in_result = [c for c in probe_columns if c in all_safe]
+                if safe_in_result:
+                    col_list = ", ".join(safe_in_result)
+                    sql = f"SELECT {col_list} FROM ({sql}) _safe"
+                else:
+                    # Original query only had PII cols; pick first table's safe columns
+                    tbl_name = referenced_tables[0]["table_name"]
+                    cols = safe_by_table.get(tbl_name, list(next(iter(safe_by_table.values()))))
+                    col_list = ", ".join(cols)
+                    sql = f'SELECT {col_list} FROM "{tbl_name}"'
 
     # Execute with auto-retry on error
     max_attempts = 1 if req.sql else 2  # only retry LLM-generated SQL
@@ -492,17 +562,15 @@ async def query(req: QueryRequest):
 
     all_columns = [str(k) for k in rows[0].keys()] if rows else []
 
-    # Enforce PII protection: strip PII columns from results
-    pii_columns = await _get_pii_columns(req.model_id)
+    # Safety net: always strip PII columns from results regardless of query path
+    if not pii_columns:
+        pii_columns = await _get_pii_columns(req.model_id)
     redacted = pii_columns & set(all_columns)
     if redacted:
         safe_indices = [i for i, c in enumerate(all_columns) if c not in pii_columns]
         columns = [all_columns[i] for i in safe_indices]
         result_rows = [
-            [
-                (v if not isinstance(v, bytes) else v.hex())
-                for j, v in enumerate(r.values()) if j in safe_indices
-            ]
+            [(v if not isinstance(v, bytes) else v.hex()) for j, v in enumerate(r.values()) if j in safe_indices]
             for r in rows
         ]
     else:
@@ -518,15 +586,12 @@ async def query(req: QueryRequest):
     except Exception:
         pass
 
-    response = {
+    return {
         "sql": sql,
         "columns": columns,
         "rows": result_rows,
         "row_count": len(result_rows),
     }
-    if redacted:
-        response["pii_redacted"] = sorted(redacted)
-    return response
 
 
 @app.get("/api/history")

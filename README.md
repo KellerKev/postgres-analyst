@@ -8,6 +8,8 @@ A local, open-source semantic layer for Postgres. Connect to any database, build
 
 ![Chat: ask questions in plain English, get SQL and results](pganalyst_sql_query.png)
 
+![PII Protection: queries touching PII columns are blocked and rewritten with user consent](pganalyst_pii_demo.gif)
+
 ## How it works
 
 ```
